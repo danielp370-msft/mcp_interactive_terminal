@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "interactive-terminal-server": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "${workspaceFolder}/interactive/server.py"]
+    }
+  }
+}
