@@ -1,0 +1,9 @@
+[project]
+name = "mcp-interactive-command"
+version = "0.1.0"
+description = "MCP for invoking and interacting with commands via stdio"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp>=2.0"
+]
