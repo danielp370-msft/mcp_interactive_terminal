@@ -24,8 +24,9 @@ class TestInteractiveTerminalServer(unittest.TestCase):
 
         # Wait for the echo output
         wait_response = wait_for_output_or_prompt(session_id=session_id, prompts=["Hello, World!"], timeout=5)
-        self.assertIsInstance(wait_response, str, "wait_for_output_or_prompt should return a string")
-        self.assertIn("Hello, World!", wait_response, "wait_for_output_or_prompt response should contain the echo output")
+        self.assertIsInstance(wait_response, dict, "wait_for_output_or_prompt should return a dict")
+        self.assertEqual(wait_response.get("status"), "prompt_detected")
+        self.assertIn("Hello, World!", wait_response.get("captured_output", ""), "wait_for_output_or_prompt response should contain the echo output")
 
         # Exit the session
         exit_response = exit_session(session_id=session_id)
@@ -50,8 +51,9 @@ class TestInteractiveTerminalServer(unittest.TestCase):
         wait_response = wait_for_output_or_prompt(session_id=session_id, prompts=[">>>"], timeout=5)
         print(f"TEST: Wait response: {wait_response}")  # Debugging output
         print("TEST: Detected Python prompt")
-        self.assertIsInstance(wait_response, str, "wait_for_output_or_prompt should return a string")
-        self.assertIn(">>>", wait_response, "wait_for_output_or_prompt response should contain the Python prompt")
+        self.assertIsInstance(wait_response, dict, "wait_for_output_or_prompt should return a dict")
+        self.assertEqual(wait_response.get("status"), "prompt_detected")
+        self.assertIn(">>>", wait_response.get("captured_output", ""), "wait_for_output_or_prompt response should contain the Python prompt")
 
         # Send a Python command
         send_response = send_command(session_id=session_id, command="print(42)", send_newline=True)
@@ -62,8 +64,9 @@ class TestInteractiveTerminalServer(unittest.TestCase):
         # Wait for the output of the command
         wait_response = wait_for_output_or_prompt(session_id=session_id, prompts=["42"], timeout=5)
         print("TEST: Detected output of the command")
-        self.assertIsInstance(wait_response, str, "wait_for_output_or_prompt should return a string")
-        self.assertIn("42", wait_response, "wait_for_output_or_prompt response should contain the command output")
+        self.assertIsInstance(wait_response, dict, "wait_for_output_or_prompt should return a dict")
+        self.assertEqual(wait_response.get("status"), "prompt_detected")
+        self.assertIn("42", wait_response.get("captured_output", ""), "wait_for_output_or_prompt response should contain the command output")
 
         # Exit the session
         exit_response = exit_session(session_id=session_id)
