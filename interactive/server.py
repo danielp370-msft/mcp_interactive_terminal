@@ -136,7 +136,7 @@ def start_session(command: str, args: list, log_file: bool = True) -> str:
         return f"Session {session_id} started. No log file created."
 
 @mcp.tool()
-def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, return_output: bool = True) -> dict:
+def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, return_output: bool = True, consume_post_prompt_whitespace: bool = True) -> dict:
     """Wait for specific output, a prompt, or gather output within a timeout.
 
     Parameters:
@@ -144,6 +144,7 @@ def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, 
         prompts (list): A list of strings to detect in the output (e.g., prompts or specific text).
         timeout (int, optional): The maximum time to wait for the output, in seconds. Defaults to 5.
         return_output (bool, optional): Whether to return the captured output until timeout or prompt is reached. Defaults to True.
+        consume_post_prompt_whitespace (bool, optional): If True, consume whitespace after the prompt in the output buffer. Defaults to True.
 
     Returns:
         dict: Structured output with status, prompt (if found), captured_output, remaining_bytes, and message.
@@ -177,6 +178,14 @@ def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, 
             if prompt_index != -1:
                 debug_log(f"DEBUG: Prompt '{prompt}' detected for session {session_id} at position {prompt_index}.")
                 seek_position = prompt_index + len(prompt)  # Update seek position
+                # Optionally consume whitespace after the prompt
+                if consume_post_prompt_whitespace:
+                    whitespace_end = seek_position
+                    while whitespace_end < len(shared_buffer) and shared_buffer[whitespace_end] in (' ', '\t', '\r', '\n'):
+                        whitespace_end += 1
+                    if whitespace_end > seek_position:
+                        debug_log(f"DEBUG: Consuming post-prompt whitespace for session {session_id} from {seek_position} to {whitespace_end}.")
+                        seek_position = whitespace_end
                 search_pos = seek_position  # Advance search_pos only on match
                 sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file)  # Persist seek and search positions
                 remaining_bytes = len(shared_buffer) - seek_position
@@ -198,7 +207,7 @@ def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, 
         "prompt": None,
         "captured_output": captured_output,
         "remaining_bytes": 0,
-        "message": "Timeout reached without detecting any specified prompt. Call again for more output."
+        "message": "Timeout reached without detecting any specified prompt. Check output and consider calling again."
     }
 
 @mcp.tool()

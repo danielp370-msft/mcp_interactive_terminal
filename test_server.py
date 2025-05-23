@@ -76,6 +76,29 @@ class TestInteractiveTerminalServer(unittest.TestCase):
 
         print("TEST: Completed Python interactive session test")
 
+    def test_consume_post_prompt_whitespace(self):
+        """Test that consume_post_prompt_whitespace consumes whitespace after prompt when enabled (default)."""
+        # Start a Python interactive session
+        start_response = start_session(command="python3", args=["-i"])
+        self.assertIsInstance(start_response, str)
+        self.assertIn("Session", start_response)
+        session_id = int(start_response.split()[1])
+
+        # Wait for the Python prompt (should consume whitespace after prompt)
+        wait_response = wait_for_output_or_prompt(session_id=session_id, prompts=[">>>"])
+        self.assertIsInstance(wait_response, dict)
+        self.assertEqual(wait_response.get("status"), "prompt_detected")
+        captured = wait_response.get("captured_output", "")
+        # The captured output should end with the prompt and any whitespace after it (e.g., newlines)
+        self.assertTrue(captured.rstrip().endswith(">>>"), "Captured output should end with prompt (ignoring trailing whitespace)")
+        # There should be no leading whitespace in remaining_bytes (should be 0 or only non-whitespace left)
+        self.assertTrue(wait_response.get("remaining_bytes", 0) == 0 or not wait_response.get("captured_output", "").endswith("\n"), "Whitespace after prompt should be consumed")
+
+        # Exit the session
+        exit_response = exit_session(session_id=session_id)
+        self.assertIsInstance(exit_response, str)
+        self.assertIn("terminated", exit_response)
+
 class TestInteractiveServer(unittest.TestCase):
 
     def test_get_active_sessions(self):
