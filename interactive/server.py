@@ -202,13 +202,22 @@ def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, 
     seek_position = len(shared_buffer)  # Always advance seek_position to end
     sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file)  # Persist state
     captured_output = shared_buffer[start_pos:seek_position] if return_output else None
-    return {
-        "status": "timeout",
-        "prompt": None,
-        "captured_output": captured_output,
-        "remaining_bytes": 0,
-        "message": "Timeout reached without detecting any specified prompt. Check output and consider calling again."
-    }
+    if captured_output and len(captured_output) > 0:
+        return {
+            "status": "prompt_timeout_with_bytes_received",
+            "prompt": None,
+            "captured_output": captured_output,
+            "remaining_bytes": 0,
+            "message": "Timeout reached without detecting any specified prompt, but bytes were received. Check output and consider calling again."
+        }
+    else:
+        return {
+            "status": "prompt_timeout_no_bytes_received",
+            "prompt": None,
+            "captured_output": captured_output,
+            "remaining_bytes": 0,
+            "message": "Timeout reached without detecting any specified prompt and no bytes were received."
+        }
 
 @mcp.tool()
 def send_command(session_id: int, command: str, send_newline: bool = True, preflush: bool = True) -> str:
