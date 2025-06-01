@@ -2,8 +2,8 @@
   "servers": {
     "interactive-terminal-server": {
       "type": "stdio",
-      "command": "uv",
-      "args": ["run", "${workspaceFolder}/interactive/server.py"]
+      "command": "python3.13",
+      "args": ["${workspaceFolder}/interactive/server.py"]
     }
   }
 }
