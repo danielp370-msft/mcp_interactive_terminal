@@ -14,6 +14,7 @@ import signal
 import datetime
 import fcntl  # Ensure fcntl is imported for non-blocking I/O
 from fastmcp import FastMCP
+import asyncio
 
 # Add a debug macro-like function
 DEBUG_MODE = False  # Set debug mode to false
@@ -29,16 +30,20 @@ mcp = FastMCP("Interactive Terminal Server 🖥️")
 
 # Parse command-line arguments
 DEFAULT_PORT = 8070
-parser = argparse.ArgumentParser(description="Run the Interactive Terminal Server 🖥️")
-parser.add_argument("--transport", type=str, default="stdio", choices=["stdio", "sse", "streamable-http"], help="Transport type (default: stdio, supports: stdio, sse, streamable-http)")
-parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port number for SSE or streamable-http transport (default: {DEFAULT_PORT})")
-args = parser.parse_args()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the Interactive Terminal Server 🖥️")
+    parser.add_argument("--transport", type=str, default="stdio", choices=["stdio", "sse", "streamable-http"], help="Transport type (default: stdio, supports: stdio, sse, streamable-http)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port number for SSE or streamable-http transport (default: {DEFAULT_PORT})")
+    args = parser.parse_args()
 
-sessions = {}
+# Session timeout config (seconds)
+SESSION_TIMEOUT = int(os.environ.get("MCP_SESSION_TIMEOUT", 3600))  # default 1 hour
+
+sessions = {}  # session_id: (process, master_fd, shared_buffer, seek_position, search_pos, log_file, last_activity)
 
 # Ensure all subprocesses are terminated on program exit
 def cleanup_sessions():
-    for session_id, (process, master_fd, _, _, _, _) in list(sessions.items()):
+    for session_id, (process, master_fd, _, _, _, _, _) in list(sessions.items()):
         try:
             os.killpg(os.getpgid(process.pid), signal.SIGTERM)
             debug_log(f"DEBUG: Cleanup - Terminated session {session_id}.")
@@ -59,7 +64,7 @@ def capture_output(master_fd, session_id, buffer_size=4096):
         debug_log(f"DEBUG: Captured output: {output}")
 
         # Check if the session has a log_file set
-        process, master_fd, shared_buffer, seek_position, search_pos, log_file = sessions[session_id]
+        process, master_fd, shared_buffer, seek_position, search_pos, log_file, _ = sessions[session_id]
         if log_file:
             debug_log(f"DEBUG: Writing to log file: {log_file}")
             debug_log(f"DEBUG: Output being written: {output}")
@@ -74,18 +79,51 @@ def capture_output(master_fd, session_id, buffer_size=4096):
 
 def advance_session_buffer_to_end(session_id):
     """Advance seek and search positions to the end of the buffer for the given session, after capturing any new output."""
-    process, master_fd, shared_buffer, seek_position, search_pos, log_file = sessions[session_id]
+    process, master_fd, shared_buffer, seek_position, search_pos, log_file, _ = sessions[session_id]
     # Capture any new output before advancing
     new_data = capture_output(master_fd, session_id)
     if new_data:
         shared_buffer += new_data
     seek_position = len(shared_buffer)
     search_pos = len(shared_buffer)
-    sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file)
+    sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file, _now())
+
+# Async session cleanup coroutine
+def _terminate_session(session_id):
+    session_data = sessions.pop(session_id, None)
+    if not session_data:
+        return
+    process, master_fd, *_ = session_data
+    try:
+        process.terminate()
+        process.wait(timeout=5)
+    except Exception:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except Exception:
+            pass
+    finally:
+        try:
+            os.close(master_fd)
+        except Exception:
+            pass
+
+def _refresh_last_activity(session_id):
+    if session_id in sessions:
+        sess = list(sessions[session_id])
+        sess[-1] = _now()
+        sessions[session_id] = tuple(sess)
+
+async def session_cleanup_task():
+    while True:
+        now = _now()
+        to_terminate = [sid for sid, sess in sessions.items() if now - sess[-1] > SESSION_TIMEOUT]
+        for sid in to_terminate:
+            _terminate_session(sid)
+        await asyncio.sleep(60)
 
 # Updated start_session function to include log_file in session structure and clear log file if specified
-@mcp.tool()
-def start_session(command: str, args: list, log_file: bool = True) -> str:
+async def _start_session(command: str, args: list, log_file: bool = True) -> str:
     """Start a new interactive session for a program.
 
     Parameters:
@@ -128,15 +166,13 @@ def start_session(command: str, args: list, log_file: bool = True) -> str:
         return f"Error: Failed to start command '{command}'. Details: {e}"
 
     # Add session with log_file always included, and search_pos initialized to 0
-    sessions[session_id] = (process, master_fd, "", 0, 0, log_file_path)
+    sessions[session_id] = (process, master_fd, "", 0, 0, log_file_path, _now())
 
-    if log_file_path:
-        return f"Session {session_id} started. Log file: {log_file_path}"
-    else:
-        return f"Session {session_id} started. No log file created."
+    return f"Session {session_id} started. Log file: {log_file_path if log_file_path else 'None'}"
 
-@mcp.tool()
-def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, return_output: bool = True, consume_post_prompt_whitespace: bool = True) -> dict:
+start_session = mcp.tool()(_start_session)
+
+async def _wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, return_output: bool = True, consume_post_prompt_whitespace: bool = True) -> dict:
     """Wait for specific output, a prompt, or gather output within a timeout.
 
     Parameters:
@@ -149,36 +185,29 @@ def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, 
     Returns:
         dict: Structured output with status, prompt (if found), captured_output, remaining_bytes, and message.
     """
+    _refresh_last_activity(session_id)
     if session_id not in sessions:
         debug_log("DEBUG: Invalid session ID.")
         return {
             "status": "error",
             "message": "Invalid session ID."
         }
-
-    process, master_fd, shared_buffer, seek_position, search_pos, log_file = sessions[session_id]
+    process, master_fd, shared_buffer, seek_position, search_pos, log_file, _ = sessions[session_id]
     start_time = time.time()
-
-    # Capture the initial seek position
     start_pos = seek_position
-
     while time.time() - start_time < timeout:
         new_data = capture_output(master_fd, session_id)
         if new_data:
             shared_buffer += new_data
-            sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file)  # Update the shared buffer
+            sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file, _now())
         else:
             time.sleep(0.1)
-
         debug_log(f"DEBUG: Accumulated data for session {session_id}: {shared_buffer}")
-
-        # Scan the buffer starting from the search position
         for prompt in prompts:
             prompt_index = shared_buffer.find(prompt, search_pos)
             if prompt_index != -1:
                 debug_log(f"DEBUG: Prompt '{prompt}' detected for session {session_id} at position {prompt_index}.")
-                seek_position = prompt_index + len(prompt)  # Update seek position
-                # Optionally consume whitespace after the prompt
+                seek_position = prompt_index + len(prompt)
                 if consume_post_prompt_whitespace:
                     whitespace_end = seek_position
                     while whitespace_end < len(shared_buffer) and shared_buffer[whitespace_end] in (' ', '\t', '\r', '\n'):
@@ -186,8 +215,8 @@ def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, 
                     if whitespace_end > seek_position:
                         debug_log(f"DEBUG: Consuming post-prompt whitespace for session {session_id} from {seek_position} to {whitespace_end}.")
                         seek_position = whitespace_end
-                search_pos = seek_position  # Advance search_pos only on match
-                sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file)  # Persist seek and search positions
+                search_pos = seek_position
+                sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file, _now())
                 remaining_bytes = len(shared_buffer) - seek_position
                 captured_output = shared_buffer[start_pos:seek_position] if return_output else None
                 return {
@@ -197,10 +226,9 @@ def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, 
                     "remaining_bytes": remaining_bytes,
                     "message": f"To get to get remaining bytes available after prompt, call this again."
                 }
-
     debug_log(f"DEBUG: Timeout reached for session {session_id}.")
-    seek_position = len(shared_buffer)  # Always advance seek_position to end
-    sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file)  # Persist state
+    seek_position = len(shared_buffer)
+    sessions[session_id] = (process, master_fd, shared_buffer, seek_position, search_pos, log_file, _now())
     captured_output = shared_buffer[start_pos:seek_position] if return_output else None
     if captured_output and len(captured_output) > 0:
         return {
@@ -219,8 +247,9 @@ def wait_for_output_or_prompt(session_id: int, prompts: list, timeout: int = 5, 
             "message": "Timeout reached without detecting any specified prompt and no bytes were received."
         }
 
-@mcp.tool()
-def send_command(session_id: int, command: str, send_newline: bool = True, preflush: bool = True) -> str:
+wait_for_output_or_prompt = mcp.tool()(_wait_for_output_or_prompt)
+
+async def _send_command(session_id: int, command: str, send_newline: bool = True, preflush: bool = True) -> str:
     """Send a command to the interactive session.
 
     Parameters:
@@ -231,15 +260,14 @@ def send_command(session_id: int, command: str, send_newline: bool = True, prefl
     Returns:
         str: A message indicating success or failure of sending the command.
     """
+    _refresh_last_activity(session_id)
     session_data = sessions.get(session_id)
     if not session_data:
         return "Invalid session ID."
-
     if preflush:
         advance_session_buffer_to_end(session_id)
         session_data = sessions[session_id]
-    process, master_fd, shared_buffer, seek_position, search_pos, log_file = session_data
-
+    process, master_fd, shared_buffer, seek_position, search_pos, log_file, _ = session_data
     try:
         to_send = command + ('\n' if send_newline else '')
         os.write(master_fd, to_send.encode())
@@ -247,8 +275,9 @@ def send_command(session_id: int, command: str, send_newline: bool = True, prefl
     except OSError as e:
         return f"Failed to send command: {e}"
 
-@mcp.tool()
-def exit_session(session_id: int) -> str:
+send_command = mcp.tool()(_send_command)
+
+async def _exit_session(session_id: int) -> str:
     """Terminate and clean up the interactive session.
 
     Parameters:
@@ -257,14 +286,12 @@ def exit_session(session_id: int) -> str:
     Returns:
         str: A message indicating the session termination status or an error message if termination failed.
     """
+    _refresh_last_activity(session_id)
     session_data = sessions.pop(session_id, None)
     if not session_data:
         return "Invalid session ID."
-
-    process, master_fd, _, _, _, _ = session_data
-
+    process, master_fd, _, _, _, _, _ = session_data
     debug_log(f"DEBUG: Terminating session {session_id}. Sent terminate signal.")
-
     try:
         process.terminate()
         process.wait(timeout=5)
@@ -277,25 +304,32 @@ def exit_session(session_id: int) -> str:
     finally:
         os.close(master_fd)
         debug_log(f"DEBUG: Cleaned up resources for session {session_id}.")
-
     return f"Session {session_id} terminated successfully."
 
-@mcp.tool()
-def get_active_sessions() -> dict:
+exit_session = mcp.tool()(_exit_session)
+
+async def _get_active_sessions() -> dict:
     """Retrieve a list of all active interactive sessions.
 
     Returns:
         dict: A dictionary containing session IDs and their statuses.
     """
     active_sessions = {}
-    for session_id, (process, _, _, _, _, _) in sessions.items():
+    for session_id, (process, _, _, _, _, _, _) in sessions.items():
         active_sessions[session_id] = {
             "pid": process.pid,
             "status": "running" if process.poll() is None else "zombie"
         }
     return active_sessions
 
+get_active_sessions = mcp.tool()(_get_active_sessions)
+
+def _now():
+    return int(time.time())
+
 if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.create_task(session_cleanup_task())
     if args.transport in ["sse", "streamable-http"]:
         mcp.run(transport=args.transport, port=args.port)
     else:
